@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-
+// @ts-check
 'use strict';
 
 const fs = require('fs');
@@ -9,7 +9,8 @@ const express = require('express');
 const ejs = require('ejs');
 const compression = require('compression');
 const args = require('tiny-opts-parser')(process.argv);
-const opn = require('opn');
+const open = require('open');
+const chokidar = require('chokidar');
 
 const shins = require('./index.js');
 
@@ -18,9 +19,10 @@ let lastGenTime = {};
 if (args.p) args.preserve = args.p;
 if (args.l) args.launch = args.l;
 if (args.h) args.help = args.h;
+if (args.v) args.verbose = args.v;
 
 if (args.help) {
-    console.log('Usage: node arapaho [port] [-l|--launch] [-p|--preserve]');
+    console.log('Usage: node arapaho [port] [-l|--launch] [-p|--preserve] [shins-options]');
     process.exit(0);
 }
 
@@ -30,18 +32,25 @@ app.use(compression());
 app.set('view engine', 'html');
 app.engine('html', ejs.renderFile);
 
-fs.watch('source/includes', function(eventType, filename) {
-    includesModified = true;
-});
+if (fs.existsSync('source/includes')) {
+    chokidar.watch('source/includes', {ignoreInitial:true}).on('all',function(eventType, filename) {
+        if (args.verbose) console.log(eventType, filename);
+        includesModified = true;
+    });
+}
 
 function getLastGenTime(fpath) {
     if (lastGenTime[fpath]) return lastGenTime[fpath];
-    return 0;
+    return new Date(0);
 }
 
 function check(req,res,fpath) {
     fpath = fpath.split('/').join('');
-    var srcStat = fs.statSync(path.join(__dirname,'source',fpath+'.md'));
+    var srcStat = {mtime: new Date(0)};
+    try {
+        srcStat = fs.statSync(path.join(__dirname,'source',fpath+'.md'));
+    }
+    catch (ex) {}
     var dstStat = {mtime:getLastGenTime(fpath)};
     if (!args.preserve) {
         try {
@@ -52,11 +61,11 @@ function check(req,res,fpath) {
     if (includesModified || (srcStat.mtime>dstStat.mtime)) {
         includesModified = false;
         lastGenTime[fpath] = new Date();
-        console.log('Rebuilding '+fpath);
         let source = path.join(__dirname,'source',fpath+'.md');
+        console.log('Rebuilding',fpath,'from',source);
         fs.readFile(source,'utf8',function(err,markdown){
             if (markdown) {
-                let options = {};
+                let options = Object.assign({},args);
                 if (req.query.customcss) {
                     options.customCss = true;
                 }
@@ -83,6 +92,9 @@ function check(req,res,fpath) {
                     }
                 });
             }
+            else {
+                res.send(err);
+            }
         });
     }
     else {
@@ -108,6 +120,11 @@ var server = app.listen(myport, function () {
   console.log('Arapaho server listening at http://%s:%s', host, port);
   if (args.launch) {
     console.log('Launching...');
-    opn('http://'+(host === '::' ? 'localhost' : 'host') + ':' +port+'/');
+
+    var url = 'http://'+(host === '::' ? 'localhost' : 'host') + ':' +port+'/'
+    open(url).catch(function (ex) {
+        console.error(`Unable to open URL '${url}'`);
+        console.error(ex);
+    })
   }
 });
