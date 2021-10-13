@@ -1,3 +1,4 @@
+// @ts-check
 'use strict';
 
 const fs = require('fs');
@@ -5,8 +6,9 @@ const path = require('path');
 
 const maybe = require('call-me-maybe');
 
-var hljs = require('highlightjs/highlight.pack.js');
-var hlpath = require.resolve('highlightjs/highlight.pack.js').replace('highlight.pack.js', '');
+// @ts-ignore
+var hljs = require('highlight.js');
+var hlpath = path.resolve(require.resolve('highlight.js'),'..','..');
 
 const emoji = require('markdown-it-emoji');
 const attrs = require('markdown-it-attrs');
@@ -26,12 +28,13 @@ var md = require('markdown-it')({
     }
 }).use(require('markdown-it-lazy-headers'));
 md.use(emoji);
-const yaml = require('js-yaml');
+const yaml = require('yaml');
 const ejs = require('ejs');
 const uglify = require('uglify-js');
 const cheerio = require('cheerio');
 const sanitizeHtml = require('sanitize-html');
 
+let seenIds = {};
 let globalOptions = {};
 
 function safeReadFileSync(filename,encoding) {
@@ -48,28 +51,30 @@ function safeReadFileSync(filename,encoding) {
 function javascript_include_tag(include) {
     var includeStr = safeReadFileSync(path.join(globalOptions.root, '/source/javascripts/' + include + '.inc'), 'utf8');
     if (globalOptions.minify) {
-        var scripts = [];
+        var scripts = {};
         var includes = includeStr.split('\r').join().split('\n');
         for (var i in includes) {
             var inc = includes[i];
             var elements = inc.split('"');
             if (elements[1]) {
                 if (elements[1] == 'text/javascript') {
-                    scripts.push(path.join(globalOptions.root, 'source/javascripts/all_nosearch.js'));
+                    let scriptName = path.join(globalOptions.root, 'source/javascripts/all_nosearch.js');
+                    scripts[scriptName] = fs.readFileSync(scriptName,'utf8');
                     break;
                 }
                 else {
-                    scripts.push(path.join(globalOptions.root, elements[1]));
+                    let scriptName = path.join(globalOptions.root, elements[1]);
+                    scripts[scriptName] = fs.readFileSync(scriptName,'utf8');
                 }
             }
         }
-        var bundle = uglify.minify(scripts);
+        let bundle = uglify.minify(scripts);
         if (globalOptions.inline) {
             includeStr = '<script>'+bundle.code+'</script>';
         }
         else {
             fs.writeFileSync(path.join(globalOptions.root, '/pub/js/shins.js'), bundle.code, 'utf8');
-            includeStr = safeReadFileSync(path.join(globalOptions.root, '/source/javascripts/' + include + '.bundle.inc'), 'utf8');
+            includeStr = safeReadFileSync(path.join(globalOptions.root, '/source/javascripts/' + (include.replace('_nosearch','')) + '.bundle.inc'), 'utf8');
         }
     }
     return includeStr;
@@ -103,7 +108,7 @@ function stylesheet_link_tag(stylesheet, media) {
         if (!fs.existsSync(stylePath)) {
             stylePath = path.join(hlpath, '/styles/' + stylesheet + '.css');
         }
-        var styleContent = safeReadFileSync(stylePath, "utf8");
+        var styleContent = safeReadFileSync(stylePath, 'utf8');
         styleContent = replaceAll(styleContent, '../../source/fonts/', globalOptions.fonturl||'https://raw.githubusercontent.com/Mermade/shins/master/source/fonts/');
         styleContent = replaceAll(styleContent, '../../source/', 'source/');
         if (globalOptions.customCss) {
@@ -124,15 +129,15 @@ function stylesheet_link_tag(stylesheet, media) {
             var target = path.join(globalOptions.root, '/pub/css/' + stylesheet + '.css');
             if (!fs.existsSync(target)) {
                 var source = path.join(hlpath, '/styles/' + stylesheet + '.css');
-                fs.writeFileSync(target, safeReadFileSync(source));
+                fs.writeFileSync(target, safeReadFileSync(source,'utf8'));
             }
         }
         var include = '<link rel="stylesheet" media="' + media + '" href="pub/css/' + stylesheet + '.css">';
+        if (globalOptions.css && stylesheet === 'screen') {
+            include += '\n    <link rel="stylesheet" media="' + media + '" href="' + globalOptions.css + '">';
+        }
         if (globalOptions.customCss) {
             include += '\n    <link rel="stylesheet" media="' + media + '" href="pub/css/' + override + '_overrides.css">';
-        }
-        if (globalOptions.css) {
-            include += '\n    <link rel="stylesheet" media="' + media + '" href="' + globalOptions.css + '">';
         }
         return include;
     }
@@ -154,6 +159,9 @@ function language_array(language_tabs) {
 function preProcess(content,options) {
     let lines = content.split('\r').join('').split('\n');
     const comments = [];
+    if (options.header && options.header.generator) {
+      comments.push('<!-- Generator: '+globalOptions.header.generator+' -->');
+    }
     comments.push('<!-- Renderer: Shins v'+globalOptions.shins.version+' -->');
     for (let l=0;l<lines.length;l++) {
         let line = lines[l];
@@ -177,20 +185,24 @@ function preProcess(content,options) {
     return lines.join('\n');
 }
 
-function cleanId(id) {
-    return id.toLowerCase().replace(/\W/g, '-');
+function cleanId(id, unique) {
+    id = id.toLowerCase().replace(/\W/g, '-');
+    if (unique && seenIds[id]) id += '-' + ++seenIds[id]
+    else seenIds[id] = 1;
+    return id;
 }
 
 function postProcess(content) {
-    // adds id a la GitHub autolinks to automatically-generated headers
-    content = content.replace(/\<(h[123456])\>(.*)\<\/h[123456]\>/g, function (match, header, title) {
-        return '<' + header + ' id="' + cleanId(title) + '">' + title + '</' + header + '>';
+    // clean up headers which already have ids
+    content = content.replace(/\<(h[123456]) id="(.*)"\>(.*)\<\/h[123456]\>/g, function (match, header, id, title) {
+        return '<' + header + ' id="' + cleanId(id,false) + '">' + title + '</' + header + '>';
     });
 
-    // clean up the other ids as well
-    content = content.replace(/\<(h[123456]) id="(.*)"\>(.*)\<\/h[123456]\>/g, function (match, header, id, title) {
-        return '<' + header + ' id="' + cleanId(id) + '">' + title + '</' + header + '>';
+    // adds id a la GitHub autolinks to automatically-generated headers
+    content = content.replace(/\<(h[123456])\>(.*)\<\/h[123456]\>/g, function (match, header, title) {
+        return '<' + header + ' id="' + cleanId(title,true) + '">' + title + '</' + header + '>';
     });
+
     content = content + globalOptions.comments.join('\n');
     return content;
 }
@@ -205,7 +217,8 @@ function clean(s) {
             abbr: [ 'title', 'class' ], details: [ 'open', 'class' ], div: [ 'class' ], meta: [ 'name', 'content' ],
             link: [ 'rel', 'href', 'type', 'sizes' ],
             h1: [ 'id' ], h2: [ 'id' ], h3: [ 'id' ], h4: [ 'id' ], h5: [ 'id' ], h6: [ 'id' ],
-            table: [ 'class' ], tr: [ 'class' ], td: [ 'class' ]}
+            table: [ 'class' ], tr: [ 'class' ], td: [ 'class' ],
+            blockquote: [ 'class', 'id' ]}
     };
     // replace things which look like tags which sanitizeHtml will eat
     s = s.split('\n>').join('\n$1$');
@@ -230,7 +243,7 @@ function clean(s) {
 }
 
 function getBase64ImageSource(imageSource, imgContent) {
-    if(!imageSource || !imgContent) return "";
+    if (!imageSource || !imgContent) return "";
 
     var mimeType = getMimeType(imageSource);
     return "data:" + mimeType + ";base64," + Buffer.from(imgContent).toString('base64');
@@ -254,22 +267,22 @@ function getMimeType(imageSource) {
 }
 
 function render(inputStr, options, callback) {
-
-    if (options.attr) md.use(attrs);
-    if (options.hasOwnProperty('no-links')) md.disable('linkify')
-
     if (typeof callback === 'undefined') { // for pre-v1.4.0 compatibility
         callback = options;
         options = {};
     }
+    if (options.attr) md.use(attrs);
+    if (options['no-links']) md.disable('linkify');
     if (options.inline == true) {
         options.minify = true;
     }
     if (typeof options.root === 'undefined') {
         options.root = __dirname;
     }
+    seenIds = {}; // reinitialise
     return maybe(callback, new Promise(function (resolve, reject) {
         globalOptions = options;
+        // @ts-ignore
         globalOptions.shins = require('./package.json');
 
         inputStr = inputStr.split('\r\n').join('\n');
@@ -278,7 +291,9 @@ function render(inputStr, options, callback) {
             inputArr = ('\n' + inputStr).split('\n--- \n');
         }
         var headerStr = inputArr[1];
-        var header = yaml.safeLoad(headerStr);
+        var header = yaml.parse(headerStr);
+        globalOptions.header = header;
+        if (!header) header = {};
 
         /* non-matching languages between Ruby Rouge and highlight.js at 2016/07/10 are
         ['ceylon','common_lisp','conf','cowscript','erb','factor','io','json-doc','liquid','literate_coffeescript','literate_haskell','llvm','make',
@@ -307,7 +322,8 @@ function render(inputStr, options, callback) {
                 var entry = {};
                 if (tag === 'h1') {
                     entry.id = $(this).attr('id');
-                    entry.content = $(this).text();
+                    entry.title = $(this).text();
+                    entry.content = $(this).html();
                     entry.children = [];
                     h1 = entry;
                     result.push(entry);
@@ -315,7 +331,8 @@ function render(inputStr, options, callback) {
                 if (tag === 'h2') {
                     let child = {};
                     child.id = $(this).attr('id');
-                    child.content = $(this).text();
+                    entry.title = $(this).text();
+                    child.content = $(this).html();
                     child.children = [];
                     
                     // Find next "<code>" block and pull out the type
@@ -339,7 +356,8 @@ function render(inputStr, options, callback) {
                 if ((headingLevel >= 3) && (tag === 'h3')) {
                     let child = {};
                     child.id = $(this).attr('id');
-                    child.content = $(this).text();
+                    entry.title = $(this).text();
+                    child.content = $(this).html();
                     child.children = [];
                     h3 = child;
                     if (h2) h2.children.push(child);
@@ -347,7 +365,8 @@ function render(inputStr, options, callback) {
                 if ((headingLevel >= 4) && (tag === 'h4')) {
                     let child = {};
                     child.id = $(this).attr('id');
-                    child.content = $(this).text();
+                    entry.title = $(this).text();
+                    child.content = $(this).html();
                     child.children = [];
                     h4 = child;
                     if (h3) h3.children.push(child);
@@ -355,7 +374,8 @@ function render(inputStr, options, callback) {
                 if ((headingLevel >= 5) && (tag === 'h5')) {
                     let child = {};
                     child.id = $(this).attr('id');
-                    child.content = $(this).text();
+                    entry.title = $(this).text();
+                    child.content = $(this).html();
                     child.children = [];
                     h5 = child;
                     if (h4) h4.children.push(child);
@@ -363,7 +383,8 @@ function render(inputStr, options, callback) {
                 if ((headingLevel >= 6) && (tag === 'h6')) {
                     let child = {};
                     child.id = $(this).attr('id');
-                    child.content = $(this).text();
+                    entry.title = $(this).text();
+                    child.content = $(this).html();
                     if (h5) h5.children.push(child);
                 }
             });
@@ -401,7 +422,7 @@ function render(inputStr, options, callback) {
 
         var ejsOptions = {};
         ejsOptions.debug = false;
-        ejs.renderFile(path.join(globalOptions.root, options.layout || '/source/layouts/layout.ejs'), locals, ejsOptions, function (err, str) {
+        ejs.renderFile(path.resolve(globalOptions.root, options.layout || 'source/layouts/layout.ejs'), locals, ejsOptions, function (err, str) {
             if (err) reject(err)
             else resolve(str);
         });

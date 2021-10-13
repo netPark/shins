@@ -1,8 +1,10 @@
 #!/usr/bin/env node
+// @ts-check
 
 'use strict';
 
 const fs = require('fs');
+const path = require('path');
 const options = require('tiny-opts-parser')(process.argv);
 const shins = require('./index.js');
 
@@ -46,11 +48,10 @@ options.cli = true;
 
 shins.render(inputStr,options,function(err,str){
     if (err) {
-       console.log(err);
+        console.log(err);
     }
     else {
         str = str.split('\r').join('');
-        fs.writeFileSync(options.output||'./index.html',str,'utf8');
+        fs.writeFileSync(options.output||path.join(options.root,'index.html'),str,'utf8');
     }
 });
-
